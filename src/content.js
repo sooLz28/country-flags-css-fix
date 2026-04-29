@@ -25,14 +25,14 @@ const iconFontNotSelectors = [
   ':not(.fad)',
 ].join('');
 
-const extractFontFamilyRules = () => 
+const extractFontFamilyRules = () =>
 {
   const fontFamilyRules = [];
 
   for (const sheet of document.styleSheets) {
 
     // Ignore the styles set by this extention.
-    if (sheet.ownerNode.id == extentionStyleTagId) 
+    if (sheet.ownerNode.id == extentionStyleTagId)
       continue;
 
     // Ignore any non-screen stylesheets.
@@ -41,11 +41,11 @@ const extractFontFamilyRules = () =>
       continue;
 
     try {
-      
+
       // Loop through every CSS selector in the stylesheet
       for (const rule of sheet.cssRules) {
 
-        if (!rule.style || !rule.style?.fontFamily) 
+        if (!rule.style || !rule.style?.fontFamily)
           continue;
 
         // Skip rules without a selectorText (e.g. @font-face, @keyframes, @media)
@@ -60,21 +60,23 @@ const extractFontFamilyRules = () =>
           continue;
 
         // Already modified CSS selectors may be ignored.
-        if (fontFamily.toLowerCase().includes(replacementFontName.toLowerCase())) 
+        if (fontFamily.toLowerCase().includes(replacementFontName.toLowerCase()))
           continue;
 
         fontFamilyRules.push({ selectorText, fontFamily });
       }
     }
     catch (e) {
-      // Some stylesheets might not be accessible due to CORS restrictions; ignore them.
+      // Stylesheet may be inaccessible (cross-origin) or not loaded yet.
+      // We retry on window load and document.fonts.ready, which gives slow stylesheets
+      // a second chance to be processed.
     }
   }
 
   return fontFamilyRules;
 };
 
-const createNewStyleTag = (fontFamilyRules) => 
+const createNewStyleTag = (fontFamilyRules) =>
 {
   const style = document.createElement("style");
   style.setAttribute("type", "text/css");
@@ -133,7 +135,7 @@ const createNewStyleTag = (fontFamilyRules) =>
   return style;
 };
 
-const applyCustomFontStyles = () => 
+const applyCustomFontStyles = () =>
 {
   var existingSheet = document.getElementById(extentionStyleTagId);
 
@@ -145,15 +147,18 @@ const applyCustomFontStyles = () =>
     existingSheet.parentNode.removeChild(existingSheet);
   }
 
-  if (document.head == null) 
+  if (document.head == null)
     return;
 
   document.head.appendChild(newStyleTag);
 };
 
-const preserveCustomFonts = (element) => 
+// Inject Twemoji into an element's inline style="font-family: ..." declaration.
+// CSS rules with !important can't beat inline styles, so we have to rewrite the
+// inline value directly to add Twemoji as the primary family.
+const injectFlagFontInline = (element) =>
 {
-  if (element == undefined)
+  if (!element || typeof element.getAttribute !== 'function')
     return;
 
   // Ignore elements without style attribute or any font-family property.
@@ -164,55 +169,137 @@ const preserveCustomFonts = (element) =>
   // Font family regex matching the font (group 1) and the !important modifier (group 2).
   const fontFamilyRegex = /font-family\s*:\s*([^;]+?)(\s*!important)?\s*(;|$)/;
   const match = fontFamilyRegex.exec(inlineStyle);
-    
+
   // Cancel if there is no match for any reason.
   if (!match)
     return;
 
-  const hasIsImportant = match[2] && match[2].includes('!important');
-  if (hasIsImportant)
+  const currentFontFamily = match[1].trim();
+
+  // 'inherit' cannot be combined with other fonts; let inheritance work normally.
+  if (currentFontFamily === 'inherit')
     return;
 
-  const currentFontFamily = match[1].trim();
-  element.style.setProperty('font-family', currentFontFamily, 'important');
+  // Already injected; nothing to do (also breaks the loop when our own write triggers
+  // the MutationObserver again).
+  if (currentFontFamily.toLowerCase().includes(replacementFontName.toLowerCase()))
+    return;
+
+  element.style.setProperty(
+    'font-family',
+    `'${replacementFontName}', ${currentFontFamily}`,
+    'important'
+  );
+};
+
+// Inject Twemoji into an SVG element's font-family="..." presentation attribute.
+// SVG charts (D3, Recharts, ApexCharts) usually set fonts as XML attributes,
+// which beat inheritance and aren't reached by the CSS-rule overrides.
+const injectFlagFontSvg = (element) =>
+{
+  if (!element || typeof element.getAttribute !== 'function')
+    return;
+
+  const ff = element.getAttribute('font-family');
+  if (!ff)
+    return;
+
+  if (ff === 'inherit')
+    return;
+
+  if (ff.toLowerCase().includes(replacementFontName.toLowerCase()))
+    return;
+
+  element.setAttribute('font-family', `'${replacementFontName}', ${ff}`);
+};
+
+// Walk an element and its descendants, applying both injectors.
+const processNodeSubtree = (root) =>
+{
+  if (!root || root.nodeType !== Node.ELEMENT_NODE)
+    return;
+
+  injectFlagFontInline(root);
+  injectFlagFontSvg(root);
+
+  if (typeof root.querySelectorAll !== 'function')
+    return;
+
+  root.querySelectorAll('[style*="font-family"]').forEach(injectFlagFontInline);
+  root.querySelectorAll('[font-family]').forEach(injectFlagFontSvg);
+};
+
+// Re-runs CSS-rule extraction and inline/attribute injection across the whole
+// document. Cheap to call repeatedly because both injectors short-circuit on
+// already-processed elements.
+const initialApply = () =>
+{
+  applyCustomFontStyles();
+  if (document.body)
+    processNodeSubtree(document.body);
+  else if (document.documentElement)
+    processNodeSubtree(document.documentElement);
+};
+
+initialApply();
+
+// Late stylesheets / late-loading fonts: re-apply once everything is settled.
+window.addEventListener('load', initialApply);
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(initialApply);
 }
 
-// Observe the document for dynamically added styles
-let lastStyleSheets = new Set(Array.from(document.styleSheets).map(sheet => sheet.href || sheet.ownerNode.textContent));
-const observer = new MutationObserver((mutations) => 
+// Track stylesheet nodes by reference (more robust than dedup by textContent,
+// which collides on empty <style> tags filled in later via JS).
+const seenStyleNodes = new WeakSet();
+for (const sheet of document.styleSheets) {
+  if (sheet.ownerNode) seenStyleNodes.add(sheet.ownerNode);
+}
+
+const observer = new MutationObserver((mutations) =>
 {
   let stylesheetChanged = false;
 
-  mutations.forEach(mutation => 
-  {
-    // Only focus on <link> and <style> elements.
-    mutation.addedNodes.forEach(node => 
-    {
-      if (node.id === extentionStyleTagId)
-        return;
+  for (const mutation of mutations) {
+    if (mutation.type === 'childList') {
+      for (const node of mutation.addedNodes) {
+        if (node.id === extentionStyleTagId)
+          continue;
 
-      const isStylesheet = node.nodeName === 'LINK' && node.rel === 'stylesheet';
-      const isStyleNode = node.nodeName === 'STYLE'
-      if (!isStylesheet && !isStyleNode)
-        return;
+        const isStylesheet = node.nodeName === 'LINK' && node.rel === 'stylesheet';
+        const isStyleNode = node.nodeName === 'STYLE';
 
-      const newStylesheetIdentifier = isStylesheet ? node.href : node.textContent;
-      if (lastStyleSheets.has(newStylesheetIdentifier))
-        return;
+        if ((isStylesheet || isStyleNode) && !seenStyleNodes.has(node)) {
+          seenStyleNodes.add(node);
+          stylesheetChanged = true;
 
-      stylesheetChanged = true;
-      lastStyleSheets.add(newStylesheetIdentifier);
-    });
-  });
+          // Cross-origin <link>s have empty cssRules until they finish loading;
+          // re-apply when the load event fires so we pick up their rules.
+          if (isStylesheet && typeof node.addEventListener === 'function') {
+            node.addEventListener('load', applyCustomFontStyles, { once: true });
+          }
+        }
+
+        // Inject into the new subtree's inline styles and SVG attributes.
+        processNodeSubtree(node);
+      }
+    } else if (mutation.type === 'attributes') {
+      if (mutation.attributeName === 'style') {
+        injectFlagFontInline(mutation.target);
+      } else if (mutation.attributeName === 'font-family') {
+        injectFlagFontSvg(mutation.target);
+      }
+    }
+  }
 
   if (stylesheetChanged) {
     applyCustomFontStyles();
   }
-
-  // Preserve font families set using the style attribute on any HTML element.
-  document.querySelectorAll('*').forEach(preserveCustomFonts);
 });
 
-// Observe the children of the document DOM-element and every newly added element
-// This may be a <link> element in the head, or any <style> sheet in the document.
-observer.observe(document, { childList: true, subtree: true });
+observer.observe(document, {
+  childList: true,
+  subtree: true,
+  attributes: true,
+  attributeFilter: ['style', 'font-family']
+});

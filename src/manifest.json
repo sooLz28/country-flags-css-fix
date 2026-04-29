@@ -2,13 +2,20 @@
     "name": "Country Flag Fixer",
     "default_locale": "en",
     "description": "__MSG_extDesc__",
-    "version": "2.0.3",
+    "version": "2.0.4",
     "manifest_version": 3,
     "content_scripts": [
         {
             "matches": ["<all_urls>"],
+            "js": ["content_canvas.js"],
+            "run_at": "document_start",
+            "all_frames": true,
+            "world": "MAIN"
+        },
+        {
+            "matches": ["<all_urls>"],
             "js": ["content_head.js"],
-            "run_at": "document_idle",
+            "run_at": "document_start",
             "all_frames": true
         },
         {
