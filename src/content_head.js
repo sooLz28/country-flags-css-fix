@@ -27,7 +27,37 @@ style.textContent = `
 `;
 
 // Check for cases like SVG files that don't have a head element
-if (document.head != undefined) 
-{
-  document.head.appendChild(style);
+const appendStyle = () => {
+    if (document.head == undefined)
+        return false;
+
+    document.head.appendChild(style);
+
+    // Force-load the font into memory. CSS rendering triggers font loads automatically,
+    // but Canvas 2D drawing does not — without this, canvas-based charts can't use the
+    // font even after @font-face is registered.
+    // The test text MUST contain a character inside the @font-face unicode-range, otherwise
+    // load() finds no matching font face and downloads nothing (default test text is a space,
+    // which is not in our flag-only range).
+    if (document.fonts && typeof document.fonts.load === 'function') {
+        const flagTestChar = String.fromCodePoint(0x1F1FA, 0x1F1F8); // 🇺🇸 — both code points are in range
+        document.fonts.load(`14px "${fontName}"`, flagTestChar).then(() => {
+            // Canvas-based chart libraries (uPlot, Chart.js, ECharts) won't repaint when a
+            // new font becomes available, so any chart already drawn keeps its letters until
+            // something triggers a redraw. uPlot listens to window resize, so dispatching one
+            // here makes already-rendered charts pick up the now-loaded font immediately.
+            window.dispatchEvent(new Event('resize'));
+        }).catch(() => {
+        });
+    }
+
+    return true;
+};
+
+if (!appendStyle()) {
+    // document.head not yet available (e.g. running before <head> is parsed); wait for it.
+    const headObserver = new MutationObserver(() => {
+        if (appendStyle()) headObserver.disconnect();
+    });
+    headObserver.observe(document.documentElement, {childList: true, subtree: true});
 }
